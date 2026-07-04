@@ -780,6 +780,30 @@ void MediaSync::onBufferReleasedByOutput(sp<IGraphicBufferProducer> &output) {
         return;
     }
 
+    if (status != NO_ERROR) {
+        // For any other error such as DEAD_OBJECT or
+        // FAILED_TRANSACTION, the buffer sp<> is nullptr. For
+        // DEAD_OBJECT, the binderDied callback will handle cleanup
+        // once it is delivered and acquires mMutex.
+        // FAILED_TRANSACTION is returned when the binder driver
+        // returns BR_FROZEN_REPLY or BR_FAILED_REPLY, which are
+        // indistinguishable in userspace. For BR_FROZEN_REPLY the
+        // process hosting the output Surface's
+        // BnGraphicBufferProducer always ends up dead. In the
+        // freeze-before-kill case, SIGKILL follows immediately. In
+        // the cached apps freezing case, detachNextBuffer is a
+        // synchronous binder transaction to the frozen process and
+        // when unfreezing ActivityManager kills any frozen process
+        // that received a synchronous binder transaction instead
+        // of unfreezing it. In both cases binderDied handles
+        // cleanup. NOTE: For BR_FAILED_REPLY, returning early strands
+        // the buffer in the output Surface BufferQueue and
+        // inflates mNumOutstandingBuffers, but this is strictly
+        // better than the nullptr dereference that occurs without
+        // this check.
+        return;
+    }
+
     ALOGV("detached buffer %#llx from output", (long long)buffer->getId());
 
     // If we've been abandoned, we can't return the buffer to the input, so just
@@ -842,7 +866,10 @@ void MediaSync::onAbandoned_l(bool isInput) {
     if (!mIsAbandoned) {
         if (isInput) {
             mOutput->disconnect(NATIVE_WINDOW_API_MEDIA);
-        } else {
+        } else if (mInput != nullptr) {
+            // mInput is only assigned in createInputSurface(); guard against
+            // the case where the process hosting the output Surface's
+            // BnGraphicBufferProducer dies before that's called.
 #if COM_ANDROID_GRAPHICS_LIBGUI_FLAGS(WB_MEDIA_MIGRATION)
             mInput->abandon();
 #else
@@ -896,12 +923,6 @@ void MediaSync::InputListener::onFrameAvailable(const BufferItem &/* item */) {
 // We don't care about sideband streams, since we won't relay them.
 void MediaSync::InputListener::onSidebandStreamChanged() {
     ALOGE("onSidebandStreamChanged: got sideband stream unexpectedly.");
-}
-
-
-void MediaSync::InputListener::binderDied(const wp<IBinder> &/* who */) {
-    Mutex::Autolock lock(mSync->mMutex);
-    mSync->onAbandoned_l(true /* isInput */);
 }
 #endif
 
